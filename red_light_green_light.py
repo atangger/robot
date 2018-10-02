@@ -14,12 +14,12 @@ light_change_time = rospy.Time.now()
 rate = rospy.Rate(10)
 
 while not rospy.is_shutdown():
-	print('now forward = %d'%(driving_forward))
-	if driving_forward:
-		cmd_vel_pub.publish(green_light_twist)
-	else:
-		cmd_vel_pub.publish(red_light_twist)
-	if light_change_time < rospy.Time.now():
-		driving_forward = not driving_forward
-		light_change_time = rospy.Time.now() + rospy.Duration(3)
-	rate.sleep()
+    print('now forward = %d' % (driving_forward))
+    if driving_forward:
+        cmd_vel_pub.publish(green_light_twist)
+    else:
+        cmd_vel_pub.publish(red_light_twist)
+    if light_change_time < rospy.Time.now():
+        driving_forward = not driving_forward
+        light_change_time = rospy.Time.now() + rospy.Duration(3)
+    rate.sleep()

@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 import rospy
 import numpy as np
+import scipy.linalg as linalg
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist, Point, Quaternion
 import tf
 from rbx1_nav.transform_utils import quat_to_angle, normalize_angle
-from math import radians, copysign, sqrt, pow, pi ,isnan
+from math import radians, copysign, sqrt, pow, pi, isnan
 
 
 def scan_callback(msg):
-    print("msg.range = %d"%(len(msg.ranges)))
+    print("msg.range = %d" % (len(msg.ranges)))
     range_left = msg.ranges[len(msg.ranges) - 1]
     range_ahead = msg.ranges[len(msg.ranges)/2]
     range_right = msg.ranges[0]
@@ -31,22 +32,26 @@ class BUG2():
             '/scan', LaserScan, self.scan_cb)
 
         self.scan_data = None
-        self.scan_dist_threshold = 1.2    # TODO
+        self.scan_dist_threshold = 1.    # TODO
 
         # Scene setting
         self.destination = np.reshape(np.array([10.0, 0.0]), (2, 1))
 
-        self.mline_norm = np.reshape(np.array([0.0,0.0]),(2,1))
-        self.mline_norm[1] = - self.destination[0]/np.linalg.norm(self.destination)
-        self.mline_norm[0] = - self.destination[1]/np.linalg.norm(self.destination)
+        self.mline_norm = np.reshape(np.array([0.0, 0.0]), (2, 1))
+        self.mline_norm[1] = - self.destination[0] / \
+            np.linalg.norm(self.destination)
+        self.mline_norm[0] = - self.destination[1] / \
+            np.linalg.norm(self.destination)
 
-        self.mline_threshold = 0.3
+        self.mline_vec = self.destination / np.linalg.norm(self.destination)
+
+        self.mline_threshold = 0.1
         self.hit_point_threshold = 0.4
         self.dest_threshold = 0.4
         # Config
         self.angletolerance = 0.01
-        self.angular_speed = 1.0
-        self.linear_speed = 0.5
+        self.angular_speed = 2.0
+        self.linear_speed = 2.0
 
         # State == 0: Walking on the line
         # State == 1: Circling an obstacle
@@ -54,22 +59,19 @@ class BUG2():
         # State == 3: Trapped in deadloop
         self.state = 0
         self.hit_point = None
-       	self.hit_bef_cnt = 0 # in case hit at the first point
+        self.hit_bef_cnt = 0  # in case hit at the first point
 
-        self.eps_k = 1e-3
+        self.eps_k = 1e-5
         self.eps_l2 = 1e-3
 
-        #self.is_on_m_line = self.initmline()  # TODO: Threshold
+        # self.is_on_m_line = self.initmline()  # TODO: Threshold
         #self.is_at_destination = lambda pos: ((pos - self.destination) ** 2).sum() < self.eps_l2 ** 2
 
-        #rospy.spin()
+        # rospy.spin()
 
-    """
-    Execute this to initialize the m-line
-    """
-    def scan_cb(self,msg):
-    	# print("msg.range = %d"%(len(msg.ranges)))
-    	self.scan_data = msg.ranges
+    def scan_cb(self, msg):
+        # print("msg.range = %d"%(len(msg.ranges)))
+        self.scan_data = msg.ranges
         range_left = msg.ranges[len(msg.ranges) - 1]
         range_ahead = msg.ranges[len(msg.ranges)/2]
         range_right = msg.ranges[0]
@@ -79,10 +81,21 @@ class BUG2():
         # print(np.isnan(range_ahead))
         # print("range right: %0.1f" % range_right)
 
+    """
+    Execute this to initialize the m-line
+    """
+
     def initmline(self):
         _x1, _y1 = self.get_odom()[0]
         _x2, _y2 = self.destination
-        return lambda pos: abs((pos[1] - _y1) * (pos[0] - _x2) - (pos[1] - _y2) * (pos[0] - _x1)) < self.eps_k
+
+        def isonmline(pos):
+            on = abs((pos[1] - _y1) * (pos[0] - _x2) -
+                     (pos[1] - _y2) * (pos[0] - _x1)) < self.eps_k
+            k1, k2 = linalg.solve(
+                np.array([[0, 0], [_x2, _y2]]), np.array([_x1, _y1]))
+            return abs(k1 - k2) < self.eps_k
+        return isonmline
 
     """
     What bug will do in every workloop
@@ -94,9 +107,9 @@ class BUG2():
         elif self.state == 1:
             self.circle()
         elif self.state == 2:
-        	print("Reached Destination!!")
+            print("Reached Destination!!")
         elif self.state == 3:
-        	print("Unable to Reach Destination!!")
+            print("Unable to Reach Destination!!")
         else:
             print("No such state in BUG2 algorithm")
 
@@ -106,30 +119,38 @@ class BUG2():
 
     def workloop(self):
         while not rospy.is_shutdown() and self.state in (0, 1, 2, 3):
-            print("in work loop state = %d" %(self.state))
+            print("State = %d" % (self.state))
             self.work()
-            rospy.sleep(2)
-            print("DEBUG GETHERE")
+            rospy.sleep(1)
             self.switch_state()
 
-
     def is_on_mline(self):
-    	(pos, rot) = self.get_odom()
+        (pos, rot) = self.get_odom()
         nowpos = np.reshape(np.array([pos.x, pos.y]), (1, 2))
-        normdis = abs(np.dot(nowpos,self.mline_norm))
-        print("now normdis = %f"%(normdis))
-        if normdis < self.mline_threshold :
-        	print("ON mline")
-        	return True
+        normdis = abs(np.dot(nowpos, self.mline_norm))
+        print("Normdis = %f" % (normdis))
+        if normdis < self.mline_threshold:
+            print("ON mline")
+            print("MLINE_VEC = {}".format(self.mline_vec.shape))
+            print("NOWPOS = {}".format(nowpos.shape))
+            # p = self.mline_vec.dot(nowpos)[0]
+            p = nowpos.reshape(-1).dot(self.mline_vec.reshape(-1))
+            print("P = {}".format(p))
+            if 0 <= p and p <= self.destination.norm():
+                print("ON and IN mline")
+                return True
+            else:
+                print("ON but OUT mline")
+                return False
         else:
-        	print("OFF mline")
-        	return False
+            print("OFF mline")
+            return False
 
     def is_old_hit(self):
-    	(pos, rot) = self.get_odom()
+        (pos, rot) = self.get_odom()
         nowpos = np.reshape(np.array([pos.x, pos.y]), (2, 1))
         offset = np.linalg.norm((nowpos - self.hit_point))
-        print('offset = %f'%(offset))
+        print('offset = %f' % (offset))
         if offset < self.hit_point_threshold:
             print("OLD hit")
             return True
@@ -138,18 +159,17 @@ class BUG2():
             return False
 
     def is_reach(self):
-    	(pos, rot) = self.get_odom()
+        (pos, rot) = self.get_odom()
         nowpos = np.reshape(np.array([pos.x, pos.y]), (2, 1))
         offset = np.linalg.norm((nowpos - self.destination))
-        print('dest offset = %f'%(offset))
+        print('dest offset = %f' % (offset))
         if offset < self.dest_threshold:
-        	return True
+            return True
         else:
-        	return False
-
+            return False
 
     def set_hit_point(self):
-    	(pos, rot) = self.get_odom()
+        (pos, rot) = self.get_odom()
         nowpos = np.reshape(np.array([pos.x, pos.y]), (2, 1))
         self.hit_point = nowpos
         self.hit_bef_cnt = 3
@@ -163,29 +183,29 @@ class BUG2():
     def switch_state(self):
         if self.state == 0:
             if self.is_obstacle():
-            	print('switch state')
-            	self.set_hit_point()
+                print('switch state')
+                self.set_hit_point()
                 self.state = 1
             else:
-            	pass
+                pass
 
             if self.is_reach():
-            	self.state = 2
+                self.state = 2
         elif self.state == 1:
-        	if self.is_on_mline():
-        		if not self.is_old_hit():
-        			self.state = 0
-        		else:
-        			if self.hit_bef_cnt == 0:
-        				self.state = 3
-        			else:
-        				self.hit_bef_cnt-=1
+            if self.is_on_mline():
+                if not self.is_old_hit():
+                    self.state = 0
+                else:
+                    if self.hit_bef_cnt == 0:
+                        self.state = 3
+                    else:
+                        self.hit_bef_cnt -= 1
 
-        	else:
-        		self.hit_bef_cnt = 0
+            else:
+                self.hit_bef_cnt = 0
 
-        	if self.is_reach():
-        		self.state = 2
+            if self.is_reach():
+                self.state = 2
             # pos = self.get_odom()[0]
             # if ((pos - self.hitpoint) ** 2).sum() < self.eps_l2 ** 2:    # Return to hitpoint
             #     rospy.loginfo("Impossible to reach destination with BUG2 algorithm. Terminating BUG2 turtlebot...")
@@ -197,19 +217,19 @@ class BUG2():
             #     self.turn_to_dest()
             #     self.state = 0
         else:
-            print("State %d should not be here"%(self.state))
+            print("State %d should not be here" % (self.state))
 
     def is_obstacle(self):
-    	mindis = 100
-    	for i in range(len(self.scan_data)):
-    		if not np.isnan(self.scan_data[i]):
-    			mindis = min(mindis,self.scan_data[i])
-    	# print("now the ahead = %f"%(self.scan_data[len(self.scan_data)/2]))
-    	print("now min dis = %f" % mindis)
-    	if mindis < self.scan_dist_threshold:
-    		return True
-    	else:
-    		return False
+        mindis = 100
+        for i in range(len(self.scan_data)):
+            if not np.isnan(self.scan_data[i]):
+                mindis = min(mindis, self.scan_data[i])
+        # print("now the ahead = %f"%(self.scan_data[len(self.scan_data)/2]))
+        print("now min dis = %f" % mindis)
+        if mindis < self.scan_dist_threshold:
+            return True
+        else:
+            return False
 
     """
     Try to move forward. Only when self.state == 0
@@ -220,15 +240,15 @@ class BUG2():
         try:
             self.turn_to_dest()
         except Exception as e:
-        	print("turn_to_dest error: ")
-        	print(e.message)
+            print("turn_to_dest error: ")
+            print(e.message)
         forward = Twist()
         forward.linear.x = 0.2
 
         self.cmd_vel_pub.publish(forward)
 
-    def forward_dis(self,dis):
-    	print('in the forward_dist')
+    def forward_dis(self, dis):
+        print('in the forward_dist')
         rate = 200
         r = rospy.Rate(rate)
         move_cmd = Twist()
@@ -246,14 +266,15 @@ class BUG2():
 
     def circle(self):
         while(self.is_obstacle()):
-        	self.rotate(0.5,self.angular_speed)
+            self.rotate(0.5, self.angular_speed)
         self.forward_dis(0.2)
         while(not self.is_obstacle()):
-        	self.rotate(-0.3,self.angular_speed)
+            self.rotate(-0.3, self.angular_speed)
 
     """
     Rotate
     """
+
     def rotate(self, angle, angspeed):
         rate = 200
         r = rospy.Rate(rate)
@@ -269,7 +290,6 @@ class BUG2():
         move_cmd = Twist()
         self.cmd_vel_pub.publish(move_cmd)
 
-
     """
     Turn to destination
     """
@@ -281,7 +301,7 @@ class BUG2():
             nowangle = rot[2]
             nowpos = np.reshape(np.array([pos.x, pos.y]), (2, 1))
             destpose = self.destination - nowpos
-            
+
             xaxis = np.reshape(np.array([1, 0]), (1, 2))
             # print("nowangle = ")
             # print(nowangle)
@@ -292,12 +312,13 @@ class BUG2():
             # print("xaxis = ")
             # print(xaxis)
             # print(np.dot(xaxis, destpose)/np.linalg.norm(destpose))
-            destangle = np.arccos(np.dot(xaxis, destpose)/np.linalg.norm(destpose))
+            destangle = np.arccos(
+                np.dot(xaxis, destpose)/np.linalg.norm(destpose))
             # print("destangle = %f"% destangle)
 
             # print(nowpos)
             # print("nowpos[1] = %f"% nowpos[1] )
-            
+
             if(destpose[1] < 0):
                 destangle = -destangle
 
@@ -309,8 +330,8 @@ class BUG2():
             try:
                 self.rotate(offset, self.angular_speed)
             except Exception as e:
-            	print("rotation problem in turn_to_dest")
-            	print(e.message)
+                print("rotation problem in turn_to_dest")
+                print(e.message)
             maxiter -= 1
 
     """
@@ -331,6 +352,7 @@ class BUG2():
 
 
 if __name__ == '__main__':
+    print("Successfuly imported all packages")
     try:
         bug = BUG2()
         bug.workloop()

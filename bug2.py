@@ -45,13 +45,18 @@ class BUG2():
         self.hit_bef_cnt = 0 
 
         self.eps_l2 = 0.4
-        self.mline_threshold = 0.3                                                  # Dist to MLine
-        self.scan_dist_threshold = 1.5
+        self.mline_threshold = 0.25                                                  # Dist to MLine
+        self.scan_dist_threshold = 1.4
+        self.eps_dest = 0.1
+        
+        self.scan_width = 110
 
         self.is_on_mline = lambda pos: abs(pos.dot(self.mline_norm)) < self.mline_threshold and (self.hit_point.dot(self.mline_vec) <= pos.dot(self.mline_vec) <= self.destnorm)
         self.is_at_hitpoint = lambda pos: ((pos - self.hit_point) ** 2).sum() < self.eps_l2 ** 2
-        self.is_at_destination = lambda pos: ((pos - self.destination) ** 2).sum() < self.eps_l2 ** 2
-        self.is_obstacle = lambda: np.nanmin(self.scan_data) < self.scan_dist_threshold if not all(np.isnan(self.scan_data)) else False
+        self.is_at_destination = lambda pos: ((pos - self.destination) ** 2).sum() < self.eps_dest ** 2
+        self.is_obstacle_left = lambda: np.nanmin(self.scan_data[-self.scan_width*2-1:]) < self.scan_dist_threshold if not all(np.isnan(self.scan_data[-self.scan_width*2-1:])) else False
+        self.is_obstacle_ahead = lambda: np.nanmin(self.scan_data[len(self.scan_data)//2-self.scan_width:len(self.scan_data)+self.scan_width+1]) < self.scan_dist_threshold if not all(np.isnan(self.scan_data[len(self.scan_data)//2-self.scan_width:len(self.scan_data)+self.scan_width+1])) else False
+        self.is_obstacle_right = lambda: np.nanmin(self.scan_data[:self.scan_width*2+1]) < self.scan_dist_threshold if not all(np.isnan(self.scan_data[:self.scan_width*2+1])) else False
 
         # rospy.spin()
 
@@ -62,7 +67,7 @@ class BUG2():
         range_left = msg.ranges[-1]
         range_ahead = msg.ranges[len(msg.ranges)/2]
         range_right = msg.ranges[0]
-        print("{:.2f}, {:.2f}, {:.2f}".format(range_left, range_ahead, range_right))
+        print("SCANNER: {:.2f}, {:.2f}, {:.2f}".format(range_left, range_ahead, range_right))
         """
 
     """
@@ -82,14 +87,31 @@ class BUG2():
     def workloop(self):
         while not rospy.is_shutdown() and self.state in (0, 1):
             print("State = %d" % (self.state))
+            if self.precheck():
+                continue
             self.work()
             self.switch_state()
         if self.state == 2:
             print("State 2: Turtlebot is at its destination. Congratulations!")
         elif self.state == 3:
-            print("State 3: Turtlebot cannot find a way to its destination QAQ")
+            print("State 3: Turtlebot cannot find a way to its destination =(")
         else:
             print("rospy shutdown")
+
+    """
+    In case that after stepping on m-line, turtlebot will not check obstacle before next move.
+    """
+    def precheck(self):
+        if self.scan_data is None:
+            return True
+        if self.state == 0:
+            print("Obstacle ahead: {}".format(self.is_obstacle_ahead()))
+            if self.is_obstacle_ahead():
+                print('Obstacle detected, switch to Circle Mode')
+                self.set_hit_point()
+                self.state = 1 
+                return True
+        return False
 
     """
     Check state conditions and switch
@@ -98,12 +120,18 @@ class BUG2():
     """
     def switch_state(self):
         pos = self.get_odom()[0]
+        print("POS = {}".format(pos))
         if self.is_at_destination(pos):
             self.state = 2
             return
 
+        msg = self.scan_data
+        range_left = msg[-1]
+        range_ahead = msg[len(msg)/2]
+        range_right = msg[0]
+        print("SCANNER: {:.2f}, {:.2f}, {:.2f}".format(range_left, range_ahead, range_right))
         if self.state == 0:
-            if self.is_obstacle():
+            if self.is_obstacle_ahead():
                 print('Obstacle detected, switch to Circle Mode')
                 self.set_hit_point()
                 self.state = 1
@@ -148,27 +176,28 @@ class BUG2():
             print(e.message)
             return
         
-        if dist > self.linear_step * 1.5:
-            self.cmd_forward(self.linear_step * 1.5)
-            rospy.sleep(0.4)
+        if dist < self.linear_step:
+            self.cmd_forward(self.linear_step * 0.2)        # When approaching the destination
+            rospy.sleep(0.5)
         else:
             self.cmd_forward(self.linear_step)
-            rospy.sleep(0.3)
+            rospy.sleep(1)
 
     """
     Circling the obstacle. Only when self.state == 1
     """
     def circle(self):
         cnt = 2
-        while(self.is_obstacle()):
+        while(self.is_obstacle_right() or self.is_obstacle_ahead()):
             self.cmd_rotate(0.1)
             cnt += 1
         self.cmd_forward(self.linear_step)
-        while(not self.is_obstacle()):
+        while(not self.is_obstacle_right() and not self.is_obstacle_ahead()):
             self.cmd_rotate(-0.05)
             cnt += 1
         self.cmd_rotate(0.05)
-        rospy.sleep(min(cnt * 0.05, 0.5))
+        # rospy.sleep(1)
+        rospy.sleep(min(cnt * 0.05, 0.4))
 
     """
     Record hit point
